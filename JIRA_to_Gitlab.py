@@ -3,11 +3,16 @@ import json
 import requests
 from requests.auth import HTTPBasicAuth
 import re
-
+from json_exract import json_extract
+from image_post import image_post
 
 
 ##############################################################################
 ## General
+"""
+Lines 23, 25, 27, 29, 31, 33, 35, 41, 43, 45, 47, 49, 51, 66, 67 & 315 need to be changed 
+to details from your JIRA & Gitlab instances
+"""
 
 # *False* if Jira / GitLab is using self-signed certificates, otherwise *True*
 VERIFY_SSL_CERTIFICATE = True
@@ -16,11 +21,11 @@ VERIFY_SSL_CERTIFICATE = True
 ## Jira specifics
 
 # Jira URL
-JIRA_URL = 'https://jmaltd.atlassian.net/rest/api/3'
+JIRA_URL = 'https://yourdomain.atlassian.net/rest/api/3'
 # Jira user credentials (incl. API token)
-JIRA_ACCOUNT = ('calum.murray@jmaconsulting.biz', 'your-api-token')
+JIRA_ACCOUNT = ('email-from-JIRA-account', 'your-api-token')
 # Jira project ID (short)
-JIRA_PROJECT = 'ADMIN'
+JIRA_PROJECT = 'KEY'
 # Jira Query (JQL)
 JQL = 'project=%s+AND+issueType=Epic+AND+resolution=Unresolved+ORDER+BY+createdDate+ASC&maxResults=100' % JIRA_PROJECT
 # Jira Epic custom field
@@ -34,17 +39,17 @@ JIRA_STORY_POINTS_FIELD = 'customfield_10014'
 ## GitLab specifics
 
 # GitLab URL
-GITLAB_URL = 'https://lab.jmaconsulting.biz/api/v4'
+GITLAB_URL = 'https://lab.your-instance.com/api/v4'
 # GitLab token will be used whenever the API is invoked
 GITLAB_TOKEN = 'your-gitlab-token'
 # GitLab group
-GITLAB_GROUP = 'test-group'
+GITLAB_GROUP = 'group-name'
 # GitLab group id
-GITLAB_GROUP_ID = '47'
+GITLAB_GROUP_ID = 'group-id-number'
 # Gitlab project with group/namespace
-GITLAB_PROJECT = 'test-group/test'
+GITLAB_PROJECT = 'group-name/project-name'
 # GitLab project id
-GITLAB_PROJECT_ID = '51'
+GITLAB_PROJECT_ID = 'project-id-number'
 
 ##############################################################################
 ## Import configuration
@@ -61,11 +66,7 @@ ADD_SPRINT = False
 USERNAMES_MAP = {
     # 'your-jira-user-1': 'your-gitlab-user1',
     # 'your-jira-user-2': 'your-gitlab-user2',
-    'calum.murray@jmaconsulting.biz': 'calum',
-    'joe.murray@jmaconsulting.biz': 'joe',
-    'edsel.lopez@jmaconsulting.biz': 'edsel',
-    'monish.deb@jmaconsulting.biz': 'monish',
-    'seamus.lee@jmaconsulting.biz': 'seamus'
+   
 }
 
 # Convert Jira issue types to Gitlab labels
@@ -96,29 +97,6 @@ STORY_POINTS_MAP = {
 
 
 ##############################################################################
-# extract values from json
-def json_extract(obj, key):
-    """Recursively fetch values from nested JSON."""
-    arr = []
-
-    def extract(obj, arr, key):
-        """Recursively search for values of key in JSON tree."""
-        if isinstance(obj, dict):
-            for k, v, in obj.items():
-                if isinstance(v, (dict, list)):
-                    extract(v, arr, key)
-                elif v == 'paragraph':
-                    arr.append('<br/>')
-                elif k == key:
-                    if v is not None:
-                        arr.append(v)
-        elif isinstance(obj, list):
-            for item in obj:
-                extract(item, arr, key)
-        return arr
-    separator = ' '
-    values = separator.join(extract(obj, arr, key))
-    return values
 
 
 # GET request
@@ -144,28 +122,26 @@ def gl_post_request(endpoint, data):
         data=data
     )
 
-    print('response is =', response.status_code)
+    print('response is =', response.json())
     if response.status_code != 201:
         raise Exception("Unable to write data from %s!" % GITLAB_PROJECT_ID)
-
     return response.json()
 
 
-# POST request
-def gl_put_request(endpoint, data):
+# PUT request
+def gl_put_request(endpoint, gl_project, data):
     response = requests.put(
-        GITLAB_URL + endpoint,
+        GITLAB_URL + '/' + gl_project + endpoint,
         headers={'PRIVATE-TOKEN': GITLAB_TOKEN},
         verify=VERIFY_SSL_CERTIFICATE,
         data=data
     )
 
-
-    if response.status_code != 200:
-        if response.status_code != 201:
-            print(response.status_code)
-            raise Exception("Unable to change data from %s!" % GITLAB_PROJECT_ID)
-
+    # if response.status_code != 200:
+    # if response.status_code != 201:
+    #   print(response.status_code)
+    #  raise Exception("Unable to change data from %s!" % GITLAB_PROJECT_ID)
+    print(response.json())
     return response.json()
 
 
@@ -201,7 +177,7 @@ if not GITLAB_PROJECT_ID:
 ##############################################################################
 
 # Get milestone or create one
-def get_milestone_id(title):
+def get_milestone_id(title, gl_milestones):
     for milestone in gl_milestones:
         if milestone['title'] == title:
             return milestone['id']
@@ -215,138 +191,164 @@ def get_milestone_id(title):
 
 ##############################################################################
 
-# Get all milestones
-gl_milestones = gl_get_request('/projects/%s/milestones' % GITLAB_PROJECT_ID)
+def migrate_project(jira_project, gitlab_group_id, gitlab_project, gitlab_project_id):
+    # Get all milestones
+    gl_milestones = gl_get_request('/projects/%s/milestones' % gitlab_project_id)
 
-# Get all GitLab members
-gl_members = gl_get_request('/groups/%s/members' % GITLAB_GROUP_ID)
+    # Get all GitLab members
+    gl_members = gl_get_request('/groups/%s/members' % gitlab_group_id)
 
-# Get Jira issues
-jira_issues = jira_get_request('/search?jql=' + JQL)
+    jira_issues_number = jira_get_request('/search?jql=project=%s ORDER BY created ASC&startAt=0&maxResults=0'
+                                          % jira_project)['total']
+    print(jira_issues_number)
 
-for issue in jira_issues['issues']:
-    with open('json_file.json', 'w') as json_file:
-        json.dump(issue, json_file, indent=4, separators=(':', ','))
-        print(json_file)
+    for startIndex in range(0, jira_issues_number, 100):
 
-    jira_key = issue['key']
-    jira_issue_type = issue['fields']['issuetype']['name']
+        jira_issues = jira_get_request('/search?jql=project=%s ORDER BY created ASC&startAt=%s&maxResults=-1'
+                                       % (jira_project, startIndex))
 
-    gl_issue_type = ''
-    if jira_issue_type not in ISSUE_TYPES_MAP:
-        print("Unknown issue type detected. Jira issue %s skipped" % jira_key)
-        continue
-    else:
-        gl_issue_type = ISSUE_TYPES_MAP[jira_issue_type]
+        for issue in jira_issues['issues']:
+            with open('json_file.json', 'w') as json_file:
+                json.dump(issue, json_file, indent=4, separators=(':', ','))
+                print(json_file)
 
-    ##################
+            jira_key = issue['key']
+            jira_issue_type = issue['fields']['issuetype']['name']
 
-    print("Start import of Jira issue %s" % jira_key)
-    try:
-        jira_title = issue['fields']['summary']
-    except TypeError:
-        jira_title = 'No title found on JIRA'
-    try:
-        jira_description = json_extract(issue['fields']['description']['content'], 'text')
-    except TypeError:
-        jira_description = 'No description found on JIRA'
-    print("jira_description =", jira_description)
-    try:
-        jira_issue_status = issue['fields']['status']['statusCategory']['name']
-    except TypeError:
-        jira_issue_status = 'In Progress'
-    jira_reporter = issue['fields']['reporter']['displayName']
-    jira_date = issue['fields']['created']
+            gl_issue_type = ''
+            if jira_issue_type not in ISSUE_TYPES_MAP:
+                print("Unknown issue type detected. Jira issue %s skipped" % jira_key)
+                continue
+            else:
+                gl_issue_type = ISSUE_TYPES_MAP[jira_issue_type]
 
-    # Get Jira assignee
-    jira_assignee = ''
-    if issue['fields']['assignee'] is not None and issue['fields']['assignee']['displayName'] is not None:
-        jira_assignee = issue['fields']['assignee']['displayName']
+            ##################
 
-    # Get GitLab assignee
-    gl_assignee_id = 0
-    for member in gl_members:
-        if member['name'] == jira_assignee:
-            gl_assignee_id = member['id']
-            break
+            print("Start import of Jira issue %s" % jira_key)
+            jira_reporter = issue['fields']['reporter']['displayName']
+            try:
+                jira_title = issue['fields']['summary']
+            except TypeError:
+                jira_title = 'No title found on JIRA'
+            try:
+                jira_description = jira_reporter + ':', issue['fields']['reporter']['displayName'] \
+                                   + json_extract(issue['fields']['description']['content'], 'text')
+            except TypeError:
+                jira_description = 'No description found on JIRA'
+            print("jira_description =", jira_description)
+            try:
+                jira_issue_status = issue['fields']['status']['statusCategory']['name']
+            except TypeError:
+                jira_issue_status = 'In Progress'
+            jira_date = issue['fields']['created']
 
-    # Add GitLab issue type as label
-    gl_labels = []
-    gl_labels.append(gl_issue_type)
+            # Get Jira assignee
+            jira_assignee = ''
+            if issue['fields']['assignee'] is not None and issue['fields']['assignee']['displayName'] is not None:
+                jira_assignee = issue['fields']['assignee']['displayName']
 
-    # Add "In Progress" to labels
-    if jira_issue_status == "In Progress":
-        gl_labels.append(jira_issue_type)
+            # Get GitLab assignee
+            gl_assignee_id = 0
+            for member in gl_members:
+                if member['name'] == jira_assignee:
+                    gl_assignee_id = member['id']
+                    break
 
-    # Add Epic name to labels
-    if ADD_EPIC and JIRA_EPIC_FIELD in issue['fields'] and issue['fields'][JIRA_EPIC_FIELD] is not None:
-        epic_info = jira_get_request('/issue/%s/?fields=summary' % issue['fields'][JIRA_EPIC_FIELD])
-        gl_labels.append(epic_info['fields']['summary'])
+            # Add GitLab issue type as label
+            gl_labels = []
+            gl_labels.append(gl_issue_type)
 
-    # Add Jira ticket to labels
-    gl_labels.append('jira-import::' + jira_key)
+            # Add "In Progress" to labels
+            if jira_issue_status == "In Progress":
+                gl_labels.append(jira_issue_type)
 
-    # Use the name of the last Jira sprint as GitLab milestone
-    gl_milestone = None
-    if ADD_SPRINT and JIRA_SPRINT_FIELD in issue['fields'] and issue['fields'][JIRA_SPRINT_FIELD] is not None:
-        for sprint in issue['fields'][JIRA_SPRINT_FIELD]:
-            match = re.search(r'name=([^,]+),', sprint)
-            if match:
-                name = match.group(1)
-        if name:
-            gl_milestone = get_milestone_id(match.group(1))
+            # Add Epic name to labels
+            if ADD_EPIC and JIRA_EPIC_FIELD in issue['fields'] and issue['fields'][JIRA_EPIC_FIELD] is not None:
+                epic_info = jira_get_request('/issue/%s/?fields=summary' % issue['fields'][JIRA_EPIC_FIELD])
+                gl_labels.append(epic_info['fields']['summary'])
 
-    # Get Jira attachments and comments - might want to do separately
-    jira_info = jira_get_request('/issue/%s/?fields=attachment,comment' % issue['id'])
-    jira_info_formatted = json.dumps(jira_info, indent=3)
-    print(jira_info_formatted)
+            # Add Jira ticket to labels
+            gl_labels.append('jira-import::' + jira_key)
 
+            # Use the name of the last Jira sprint as GitLab milestone
+            gl_milestone = None
+            if ADD_SPRINT and JIRA_SPRINT_FIELD in issue['fields'] and issue['fields'][JIRA_SPRINT_FIELD] is not None:
+                for sprint in issue['fields'][JIRA_SPRINT_FIELD]:
+                    match = re.search(r'name=([^,]+),', sprint)
+                    if match:
+                        name = match.group(1)
+                if name:
+                    gl_milestone = get_milestone_id(match.group(1), gl_milestones)
 
-    # Issue weight
-    gl_weight = 0
-    if JIRA_STORY_POINTS_FIELD in issue['fields'] and issue['fields'][JIRA_STORY_POINTS_FIELD]:
-        gl_weight = STORY_POINTS_MAP[issue['fields'][JIRA_STORY_POINTS_FIELD]]
+            # Get Jira attachments and comments - might want to do separately
+            jira_info = jira_get_request('/issue/%s/?fields=attachment,comment' % issue['id'])
+            jira_info_formatted = json.dumps(jira_info, indent=3)
+            print(jira_info_formatted)
 
-    # Create GitLab issue
-    print("posting to gitlab")
-    gl_issue = gl_post_request('/projects/%s/issues' % GITLAB_PROJECT_ID, {
-        'assignee_ids': [gl_assignee_id],
-        'title': jira_title,
-        'description': jira_description,
-        'milestone_id': gl_milestone,
-        'labels': ", ".join(gl_labels),
-        'weight': gl_weight,
-        'created_at': jira_date
-    })
-    print("gl_issue =", gl_issue)
+            # Issue weight
+            gl_weight = 0
+            if JIRA_STORY_POINTS_FIELD in issue['fields'] and issue['fields'][JIRA_STORY_POINTS_FIELD]:
+                gl_weight = STORY_POINTS_MAP[issue['fields'][JIRA_STORY_POINTS_FIELD]]
 
-    gl_iid = gl_issue['iid']
-    print(gl_iid)
-    # post body using comment from jira_info, need to find a way to upload and use attachment
-    # https://docs.gitlab.com/ce/api/projects.html#upload-a-file
-    for comment in jira_info['fields']['comment']['comments']:
-        author = comment['author']['displayName']
-        print(author)
-        content = json_extract(comment['body']['content'], 'text')
-        print(content)
-        comment_date = comment['created']
-        gl_comment = gl_post_request('/projects/%s/issues/%s/notes' % (GITLAB_PROJECT_ID, gl_issue['iid']), {
-            # trying to take the body from the comment - JIRA returns a lot of information
-            # need to figure out how to have the author for the comment
-            'body': "%(k)s: %(u)s" % {'k': author, 'u': content},
-            'created_at': comment_date
-        })
+            # Create GitLab issue
+            print("posting to gitlab")
+            gl_issue = gl_post_request('/projects/%s/issues' % GITLAB_PROJECT_ID, {
+                'assignee_ids': [gl_assignee_id],
+                'title': jira_title,
+                'description': jira_description,
+                'milestone_id': gl_milestone,
+                'labels': ", ".join(gl_labels),
+                'weight': gl_weight,
+                'created_at': jira_date
+            })
+            print("gl_issue =", gl_issue)
 
-    # Add a comment with the link to the Jira issue
-    if ADD_A_LINK:
-        gl_post_request('/projects/%s/issues/%s/notes' % (GITLAB_PROJECT_ID, gl_issue['iid']), {
-            'body': "Imported from Jira issue [%(k)s](%(u)sbrowse/%(k)s)" % {'k': jira_key, 'u': JIRA_URL}
-        })
-
-    # Change GitLab issue status
-    if jira_issue_status == "Done":
-        gl_put_request('api/v4/projects/%s/issues/%s' % (GITLAB_PROJECT_ID, gl_issue['iid']), {
-            'state_event': 'close'
-        })
+            gl_iid = gl_issue['iid']
+            print(gl_iid)
 
 
+            jira_attachments = []
+            for attachment in jira_info['fields']['attachment']:
+                i = image_post(
+                    attachment['content'],
+                    attachment['filename'],
+                    JIRA_ACCOUNT,
+                    'https://lab.your-instance.com/api/v4/projects/%s/uploads' % gitlab_project_id,
+                    GITLAB_TOKEN)
+                print(i)
+                jira_attachments.append(i['markdown'])
+            if jira_attachments:
+                gl_attachment_comment = gl_post_request('/projects/%s/issues/%s/notes' % (gitlab_project_id, gl_issue['iid']), {
+                    'body': jira_attachments
+                })
+
+            for comment in jira_info['fields']['comment']['comments']:
+                author = comment['author']['displayName']
+                print(author)
+                if 'content' not in comment['body']:
+                    content = comment['body']
+                else:
+                    content = json_extract(comment['body']['content'], 'text')
+                print(content)
+                comment_date = comment['created']
+                gl_comment = gl_post_request('/projects/%s/issues/%s/notes' % (gitlab_project_id, gl_issue['iid']), {
+                    # trying to take the body from the comment - JIRA returns a lot of information
+                    # need to figure out how to have the author for the comment
+                    'body': "%(k)s: %(u)s" % {'k': author, 'u': content},
+                    'created_at': comment_date
+                })
+
+            # Add a comment with the link to the Jira issue
+            if ADD_A_LINK:
+                gl_post_request('/projects/%s/issues/%s/notes' % (gitlab_project_id, gl_issue['iid']), {
+                    'body': "Imported from Jira issue [%(k)s](%(u)sbrowse/%(k)s)" % {'k': jira_key, 'u': JIRA_URL}
+                })
+
+            # Change GitLab issue status
+            if jira_issue_status == "Done":
+                gl_put_request('/projects/%s/issues/%s' % (gitlab_project_id, gl_iid), gitlab_project, {
+                    'state_event': 'close'
+                })
+
+
+migrate_project(JIRA_PROJECT, GITLAB_GROUP_ID, GITLAB_PROJECT, GITLAB_PROJECT_ID)
