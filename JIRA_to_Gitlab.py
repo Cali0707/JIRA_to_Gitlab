@@ -56,10 +56,6 @@ GITLAB_PROJECT_ID = 'project-id-number'
 
 # Add a comment with the link to the Jira issue
 ADD_A_LINK = False
-# Add an Epic to the GitLab issue
-ADD_EPIC = False
-# Add a milestone/sprint to the GitLab issue
-ADD_SPRINT = False
 
 # Jira username as key, GitLab as value
 # Note: If you want dates and times to be correct, make sure every user is (temporarily) owner
@@ -137,11 +133,6 @@ def gl_put_request(endpoint, gl_project, data):
         data=data
     )
 
-    # if response.status_code != 200:
-    # if response.status_code != 201:
-    #   print(response.status_code)
-    #  raise Exception("Unable to change data from %s!" % GITLAB_PROJECT_ID)
-    print(response.json())
     return response.json()
 
 
@@ -160,40 +151,12 @@ def jira_get_request(endpoint):
     return response.json()
 
 
-##############################################################################
-## Early exit scenario
-
-if not GITLAB_PROJECT_ID:
-    # find out the ID of the project.
-    for project in gl_get_request('/projects'):
-        if project['path_with_namespace'] == GITLAB_PROJECT:
-            GITLAB_PROJECT_ID = project['id']
-            break
-
-if not GITLAB_PROJECT_ID:
-    raise Exception("Unable to find %s in GitLab!" % GITLAB_PROJECT)
-
-
-##############################################################################
-
-# Get milestone or create one
-def get_milestone_id(title, gl_milestones):
-    for milestone in gl_milestones:
-        if milestone['title'] == title:
-            return milestone['id']
-
-    # Milestone doesn't yet exist, so we create it
-    # Note: Group Milestone MUST not exist
-    milestone = gl_post_request('/projects/%s/milestones' % GITLAB_PROJECT_ID, {'title': title})
-    gl_milestones.append(milestone)
-    return milestone['id']
 
 
 ##############################################################################
 
 def migrate_project(jira_project, gitlab_group_id, gitlab_project, gitlab_project_id):
-    # Get all milestones
-    gl_milestones = gl_get_request('/projects/%s/milestones' % gitlab_project_id)
+  
 
     # Get all GitLab members
     gl_members = gl_get_request('/groups/%s/members' % gitlab_group_id)
@@ -235,7 +198,7 @@ def migrate_project(jira_project, gitlab_group_id, gitlab_project, gitlab_projec
                                    + json_extract(issue['fields']['description']['content'], 'text')
             except TypeError:
                 jira_description = 'No description found on JIRA'
-            print("jira_description =", jira_description)
+            
             try:
                 jira_issue_status = issue['fields']['status']['statusCategory']['name']
             except TypeError:
@@ -262,23 +225,8 @@ def migrate_project(jira_project, gitlab_group_id, gitlab_project, gitlab_projec
             if jira_issue_status == "In Progress":
                 gl_labels.append(jira_issue_type)
 
-            # Add Epic name to labels
-            if ADD_EPIC and JIRA_EPIC_FIELD in issue['fields'] and issue['fields'][JIRA_EPIC_FIELD] is not None:
-                epic_info = jira_get_request('/issue/%s/?fields=summary' % issue['fields'][JIRA_EPIC_FIELD])
-                gl_labels.append(epic_info['fields']['summary'])
-
             # Add Jira ticket to labels
             gl_labels.append('jira-import::' + jira_key)
-
-            # Use the name of the last Jira sprint as GitLab milestone
-            gl_milestone = None
-            if ADD_SPRINT and JIRA_SPRINT_FIELD in issue['fields'] and issue['fields'][JIRA_SPRINT_FIELD] is not None:
-                for sprint in issue['fields'][JIRA_SPRINT_FIELD]:
-                    match = re.search(r'name=([^,]+),', sprint)
-                    if match:
-                        name = match.group(1)
-                if name:
-                    gl_milestone = get_milestone_id(match.group(1), gl_milestones)
 
             # Get Jira attachments and comments - might want to do separately
             jira_info = jira_get_request('/issue/%s/?fields=attachment,comment' % issue['id'])
@@ -292,19 +240,16 @@ def migrate_project(jira_project, gitlab_group_id, gitlab_project, gitlab_projec
 
             # Create GitLab issue
             print("posting to gitlab")
-            gl_issue = gl_post_request('/projects/%s/issues' % GITLAB_PROJECT_ID, {
+            gl_issue = gl_post_request('/projects/%s/issues' % gitlab_project_id, {
                 'assignee_ids': [gl_assignee_id],
                 'title': jira_title,
                 'description': jira_description,
-                'milestone_id': gl_milestone,
                 'labels': ", ".join(gl_labels),
                 'weight': gl_weight,
                 'created_at': jira_date
             })
-            print("gl_issue =", gl_issue)
 
             gl_iid = gl_issue['iid']
-            print(gl_iid)
 
 
             jira_attachments = []
@@ -315,7 +260,6 @@ def migrate_project(jira_project, gitlab_group_id, gitlab_project, gitlab_projec
                     JIRA_ACCOUNT,
                     'https://lab.your-instance.com/api/v4/projects/%s/uploads' % gitlab_project_id,
                     GITLAB_TOKEN)
-                print(i)
                 jira_attachments.append(i['markdown'])
             if jira_attachments:
                 gl_attachment_comment = gl_post_request('/projects/%s/issues/%s/notes' % (gitlab_project_id, gl_issue['iid']), {
@@ -324,12 +268,10 @@ def migrate_project(jira_project, gitlab_group_id, gitlab_project, gitlab_projec
 
             for comment in jira_info['fields']['comment']['comments']:
                 author = comment['author']['displayName']
-                print(author)
                 if 'content' not in comment['body']:
                     content = comment['body']
                 else:
                     content = json_extract(comment['body']['content'], 'text')
-                print(content)
                 comment_date = comment['created']
                 gl_comment = gl_post_request('/projects/%s/issues/%s/notes' % (gitlab_project_id, gl_issue['iid']), {
                     # trying to take the body from the comment - JIRA returns a lot of information
@@ -351,4 +293,23 @@ def migrate_project(jira_project, gitlab_group_id, gitlab_project, gitlab_projec
                 })
 
 
-migrate_project(JIRA_PROJECT, GITLAB_GROUP_ID, GITLAB_PROJECT, GITLAB_PROJECT_ID)
+if __name__ == '__main__':
+    from match_jira_gitlab_projects import match_jira_gitlab_projects
+    jira_projects, project_match = match_jira_gitlab_projects()
+    # Create new gitlab projects for any JIRA projects that do not already have an equivalent gitlab project
+    for project in jira_projects:
+        proj = [project]
+        response = extract_gitlab_project(gl_post_request('/projects?name=%s' % project[1]))
+        proj.append(response)
+        project_match.append(proj)
+    problem_projects = []
+    # Migrate all projects (This might take a while!)
+    for project in project_match:
+        print('Begin import of project', project[0][1])
+        try:
+            migrate_project(project[0][0], project[1][3], project[1][2], project[1][0])
+        except:
+            problem_projects.append(project)
+    print('The projects that were not migrated are:', problem_projects)        
+    
+
